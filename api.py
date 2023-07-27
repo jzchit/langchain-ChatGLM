@@ -543,6 +543,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=7861)
     parser.add_argument("--ssl_keyfile", type=str)
     parser.add_argument("--ssl_certfile", type=str)
+    print("test")
     # 初始化消息
     args = None
     args = parser.parse_args()
