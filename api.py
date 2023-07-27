@@ -23,7 +23,40 @@ import models.shared as shared
 from models.loader.args import parser
 from models.loader import LoaderCheckPoint
 
+import requests
+from concurrent.futures import ThreadPoolExecutor
+
 nltk.data.path = [NLTK_DATA_PATH] + nltk.data.path
+
+executor = ThreadPoolExecutor(10)
+
+
+def send_msg_to_dingtalk(question):
+    print("Request received...")
+    answer_result_stream_result = local_doc_qa.llm_model_chain(
+        {"prompt": question, "history": [], "streaming": True})
+    resp = ""
+    for answer_result in answer_result_stream_result['answer_result_stream']:
+        resp = answer_result.llm_output["answer"]
+        history = answer_result.history
+        pass
+
+    payload = {
+        "at": {
+            "atUserIds": ["$:LWCP_v1:$TXhW6JMRg9Tb3yzP6fm5/A=="],
+            "atDingtalkIds": ["$:LWCP_v1:$TXhW6JMRg9Tb3yzP6fm5/A=="]
+        },
+        "markdown": {
+            "text": resp,
+            "title": "ADBPG Answer"
+        },
+        "msgtype": "markdown"
+    }
+
+    response = requests.post("https://oapi.dingtalk.com/robot/send?access_token=418194b8377e7667fe2551df4b87bea700499a8375c072e7fc37a4eecf417622", json=payload)
+    print(response.text)
+    print(response.status_code)
+    print("success")
 
 
 class BaseResponse(BaseModel):
@@ -80,20 +113,20 @@ class ChatMessage(BaseModel):
         }
 
 
-# def get_kb_path(local_doc_id: str):
-#     return os.path.join(KB_ROOT_PATH, local_doc_id)
+def get_kb_path(local_doc_id: str):
+    return os.path.join(KB_ROOT_PATH, local_doc_id)
 
 
-# def get_doc_path(local_doc_id: str):
-#     return os.path.join(get_kb_path(local_doc_id), "content")
+def get_doc_path(local_doc_id: str):
+    return os.path.join(get_kb_path(local_doc_id), "content")
 
 
 # def get_vs_path(local_doc_id: str):
 #     return os.path.join(get_kb_path(local_doc_id), "vector_store")
 
 
-# def get_file_path(local_doc_id: str, doc_name: str):
-#     return os.path.join(get_doc_path(local_doc_id), doc_name)
+def get_file_path(local_doc_id: str, doc_name: str):
+    return os.path.join(get_doc_path(local_doc_id), doc_name)
 
 
 def validate_kb_name(knowledge_base_id: str) -> bool:
@@ -109,7 +142,9 @@ async def create_knowledge(
     if not validate_kb_name(knowledge_base_id):
         return BaseResponse(code=403, msg="Don't attack me", data=[])
     table_is_exist = local_doc_qa.create_knowledge_vector_store(knowledge_base_id)
-
+    saved_path = get_doc_path(knowledge_base_id)
+    if not os.path.exists(saved_path):
+        os.makedirs(saved_path)
     if table_is_exist:
         return BaseResponse(code=200, msg="知识库已经存在")
     else:
@@ -123,26 +158,24 @@ async def upload_file(
     if not validate_kb_name(knowledge_base_id):
         return BaseResponse(code=403, msg="Don't attack me", data=[])
 
+    saved_path = get_doc_path(knowledge_base_id)
+    if not os.path.exists(saved_path):
+        os.makedirs(saved_path)
+
     file_content = await file.read()  # 读取上传文件的内容
 
-    if not os.path.exists(KB_ROOT_PATH):
-        os.makedirs(KB_ROOT_PATH)
-
-    file_path = os.path.join(KB_ROOT_PATH, file.filename)
-
-    if file.filename in local_doc_qa.list_file_from_vector_store(knowledge_base_id):
-        file_status = f"文件 {file.filename} 已在知识库 {knowledge_base_id} 存在"
+    file_path = os.path.join(saved_path, file.filename)
+    if os.path.exists(file_path) and os.path.getsize(file_path) == len(file_content):
+        file_status = f"文件 {file.filename} 已存在。"
         return BaseResponse(code=200, msg=file_status)
 
-    with open(file_path, "wb") as f:  # 将文件暂存服务器
+    with open(file_path, "wb") as f:
         f.write(file_content)
 
-    knowledge_base_id, loaded_files = local_doc_qa.init_knowledge_vector_store([file_path], knowledge_base_id)
-
-    os.remove(file_path)  # 上传知识库后删除文件
-
+    knowledge_name = knowledge_base_id
+    knowledge_name, loaded_files = local_doc_qa.init_knowledge_vector_store([file_path], knowledge_name)
     if len(loaded_files) > 0:
-        file_status = f"文件 {file.filename} 已上传至新的知识库，并已加载知识库，请开始提问"
+        file_status = f"文件 {file.filename} 已上传至新的知识库，并已加载知识库，请开始提问。"
         return BaseResponse(code=200, msg=file_status)
     else:
         file_status = "文件上传失败，请重新上传"
@@ -158,35 +191,29 @@ async def upload_files(
     if not validate_kb_name(knowledge_base_id):
         return BaseResponse(code=403, msg="Don't attack me", data=[])
 
-    if not os.path.exists(KB_ROOT_PATH):
-        os.makedirs(KB_ROOT_PATH)
-    file_path_list = []
-
-    knowledge_filelist = local_doc_qa.list_file_from_vector_store(knowledge_base_id)
-
+    saved_path = get_doc_path(knowledge_base_id)
+    if not os.path.exists(saved_path):
+        os.makedirs(saved_path)
+    filelist = []
     for file in files:
         file_content = ''
-        file_path = os.path.join(KB_ROOT_PATH, file.filename)
+        file_path = os.path.join(saved_path, file.filename)
         file_content = await file.read()
-        if os.path.exists(file_path) and os.path.getsize(file_path) == len(file_content):  # 上传多个相同文件，跳过
+        if os.path.exists(file_path) and os.path.getsize(file_path) == len(file_content):
             continue
-        if file.filename in knowledge_filelist:  # 文件已在知识库，跳过
-            continue
-        with open(file_path, "wb") as f:  # 文件暂存服务器
+        with open(file_path, "wb") as f:
             f.write(file_content)
-            file_path_list.append(file_path)
-
-    if file_path_list:
-        knowledge_base_id, loaded_files = local_doc_qa.init_knowledge_vector_store(file_path_list, knowledge_base_id)
-        for file_path in file_path_list:    # 上传知识库后删除文件
-            os.remove(file_path)
-        if len(loaded_files) == len(file_path_list):
-            file_status = f"文件 {', '.join([os.path.split(i)[-1] for i in loaded_files])} 上传成功"
+        filelist.append(file_path)
+    if filelist:
+        knowledge_name = knowledge_base_id
+        knowledge_name, loaded_files = local_doc_qa.init_knowledge_vector_store(filelist, knowledge_name)
+        if len(loaded_files):
+            file_status = f"documents {', '.join([os.path.split(i)[-1] for i in loaded_files])} upload success"
             return BaseResponse(code=200, msg=file_status)
-        file_status = f"文件 {', '.join([os.path.split(i)[-1] for i in loaded_files])} 上传失败"
+        file_status = f"documents {', '.join([os.path.split(i)[-1] for i in loaded_files])} upload fail"
         return BaseResponse(code=500, msg=file_status)
     else:
-        file_status = f"所有文件已经在知识库 {knowledge_base_id} 存在"
+        file_status = f"所有文件均已存在。"
         return BaseResponse(code=200, msg=file_status)
 
 
@@ -203,7 +230,7 @@ async def list_docs(
         return ListDocsResponse(code=403, msg="Don't attack me", data=[])
 
     if not local_doc_qa.check_knowledge_in_collections(knowledge_base_id):
-        return ListDocsResponse(code=404, msg=f"知识库 {knowledge_base_id} 不存在", data=[])
+        return ListDocsResponse(code=404, msg=f"Knowledge base {knowledge_base_id} not found", data=[])
 
     all_doc_names = local_doc_qa.list_file_from_vector_store(knowledge_base_id)
     return ListDocsResponse(data=all_doc_names)
@@ -218,10 +245,12 @@ async def delete_kb(
         return BaseResponse(code=403, msg="Don't attack me")
 
     if not local_doc_qa.check_knowledge_in_collections(knowledge_base_id):
-        return BaseResponse(code=404, msg=f"知识库 {knowledge_base_id} 不存在")
+        return BaseResponse(code=404, msg=f"Knowledge base {knowledge_base_id} not found")
 
+    kb_path = get_kb_path(knowledge_base_id)
+    shutil.rmtree(kb_path)
     local_doc_qa.delete_knowledge(knowledge_base_id)
-    return BaseResponse(code=200, msg=f"知识库 {knowledge_base_id} 删除成功")
+    return BaseResponse(code=200, msg=f"Knowledge Base {knowledge_base_id} delete success")
 
 
 async def delete_doc(
@@ -236,17 +265,23 @@ async def delete_doc(
         return BaseResponse(code=403, msg="Don't attack me")
 
     if not local_doc_qa.check_knowledge_in_collections(knowledge_base_id):
-        return BaseResponse(code=404, msg=f"知识库 {knowledge_base_id} 不存在")
-
-    knowledge_filelist = local_doc_qa.list_file_from_vector_store(knowledge_base_id)
-    if doc_name in knowledge_filelist:
-        status = local_doc_qa.delete_file_from_vector_store(doc_name, knowledge_base_id)
-        if "success" in status:
-            return BaseResponse(code=200, msg=f"文件 {doc_name} 删除成功")
+        return BaseResponse(code=404, msg=f"Knowledge base {knowledge_base_id} not found")
+    doc_path = get_file_path(knowledge_base_id, doc_name)
+    if os.path.exists(doc_path):
+        os.remove(doc_path)
+        remain_docs = await list_docs(knowledge_base_id)
+        if len(remain_docs.data) == 0:
+            shutil.rmtree(get_kb_path(knowledge_base_id), ignore_errors=True)
+            local_doc_qa.delete_knowledge(knowledge_base_id)
+            return BaseResponse(code=200, msg=f"document {doc_name} delete success")
         else:
-            return BaseResponse(code=500, msg=f"文件 {doc_name} 删除失败")
+            status = local_doc_qa.delete_file_from_vector_store(doc_path, knowledge_base_id)
+            if "success" in status:
+                return BaseResponse(code=200, msg=f"document {doc_name} delete success")
+            else:
+                return BaseResponse(code=500, msg=f"document {doc_name} delete fail")
     else:
-        return BaseResponse(code=404, msg=f"文件 {doc_name} 不存在")
+        return BaseResponse(code=404, msg=f"document {doc_name} not found")
 
 
 async def update_doc(
@@ -262,40 +297,37 @@ async def update_doc(
         return BaseResponse(code=403, msg="Don't attack me")
 
     if not local_doc_qa.check_knowledge_in_collections(knowledge_base_id):
-        return BaseResponse(code=404, msg=f"知识库 {knowledge_base_id} 不存在")
-
-    # 删除文件
-    knowledge_filelist = local_doc_qa.list_file_from_vector_store(knowledge_base_id)
-    if old_doc not in knowledge_filelist:
-        return BaseResponse(code=404, msg=f"文件 {old_doc} 不存在")
-
-    delete_status = local_doc_qa.delete_file_from_vector_store(old_doc, knowledge_base_id)
-    if "fail" in delete_status:
-        return BaseResponse(code=500, msg=f"文件 {old_doc} 删除失败")
-
-    # 上传新文件
-    file_content = await new_doc.read()  # 读取上传文件的内容
-    if not os.path.exists(KB_ROOT_PATH):
-        os.makedirs(KB_ROOT_PATH)
-
-    file_path = os.path.join(KB_ROOT_PATH, new_doc.filename)
-    if new_doc.filename in local_doc_qa.list_file_from_vector_store(knowledge_base_id):
-        file_status = f"文件 {new_doc.filename} 已在知识库 {knowledge_base_id} 存在"
-        return BaseResponse(code=200, msg=file_status)
-
-    with open(file_path, "wb") as f:  # 将文件暂存服务器
-        f.write(file_content)
-
-    knowledge_base_id, loaded_files = local_doc_qa.init_knowledge_vector_store([file_path], knowledge_base_id)
-
-    os.remove(file_path)  # 上传知识库后删除文件
-
-    if len(loaded_files) > 0:
-        file_status = f"文件 {old_doc} 已删除，文件 {new_doc.filename} 已上传至知识库"
-        return BaseResponse(code=200, msg=file_status)
+        return BaseResponse(code=404, msg=f"Knowledge base {knowledge_base_id} not found")
+    doc_path = get_file_path(knowledge_base_id, old_doc)
+    if not os.path.exists(doc_path):
+        return BaseResponse(code=404, msg=f"document {old_doc} not found")
     else:
-        file_status = f"文件 {old_doc} 已删除，但文件 {new_doc.filename} 上传失败"
-        return BaseResponse(code=500, msg=file_status)
+        os.remove(doc_path)
+        delete_status = local_doc_qa.delete_file_from_vector_store(doc_path, knowledge_base_id)
+        if "fail" in delete_status:
+            return BaseResponse(code=500, msg=f"document {old_doc} delete failed")
+        else:
+            saved_path = get_doc_path(knowledge_base_id)
+            if not os.path.exists(saved_path):
+                os.makedirs(saved_path)
+
+            file_content = await new_doc.read()  # 读取上传文件的内容
+
+            file_path = os.path.join(saved_path, new_doc.filename)
+            if os.path.exists(file_path) and os.path.getsize(file_path) == len(file_content):
+                file_status = f"document {new_doc.filename} already exists"
+                return BaseResponse(code=200, msg=file_status)
+
+            with open(file_path, "wb") as f:
+                f.write(file_content)
+
+            knowledge_name, loaded_files = local_doc_qa.init_knowledge_vector_store([file_path], knowledge_base_id)
+            if len(loaded_files) > 0:
+                file_status = f"document {old_doc} delete and document {new_doc.filename} upload success"
+                return BaseResponse(code=200, msg=file_status)
+            else:
+                file_status = f"document {old_doc} success but document {new_doc.filename} upload fail"
+                return BaseResponse(code=500, msg=file_status)
 
 
 async def local_doc_chat(
@@ -482,6 +514,66 @@ async def document():
     return RedirectResponse(url="/docs")
 
 
+class DingTalkResponse(BaseModel):
+    errorCode: int = pydantic.Field(200, description="HTTP status code")
+    errorMsg: str = pydantic.Field("", description="HTTP status message")
+    success: bool = pydantic.Field(True, description="Api called success or not.")
+    fields: dict = pydantic.Field(..., description="Api return values.")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "success": True,
+                "errorCode": 200,
+                "errorMsg": "",
+                "fields": {
+                    "answer": "Chat bot answers",
+                }
+            }
+        }
+
+
+class ChatWithThirdResponse(BaseResponse):
+    data: str = pydantic.Field(..., description="Chat bot answers")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "code": 200,
+                "msg": "success",
+                "data": "Chat bot answers",
+            }
+        }
+
+
+async def chat_with_third(
+        question: str = Query(..., description="Question", example="Question")
+):
+    answer_result_stream_result = local_doc_qa.llm_model_chain(
+        {"prompt": question, "history": [], "streaming": True})
+    resp = ""
+    for answer_result in answer_result_stream_result['answer_result_stream']:
+        resp = answer_result.llm_output["answer"]
+        history = answer_result.history
+        pass
+
+    fields = {
+        "answer": resp
+    }
+    return DingTalkResponse(fields=fields)
+
+
+async def chat_with_third_async(
+        question: str = Query(..., description="Question", example="Question")
+):
+    executor.submit(send_msg_to_dingtalk, question)
+
+    fields = {
+        "answer": "Please wait for a moment..."
+    }
+    return DingTalkResponse(fields=fields)
+
+
 def api_start(host, port, **kwargs):
     global app
     global local_doc_qa
@@ -524,6 +616,8 @@ def api_start(host, port, **kwargs):
     app.delete("/local_doc_qa/delete_file", response_model=BaseResponse, summary="删除知识库内的文件")(delete_doc)
     app.post("/local_doc_qa/update_file", response_model=BaseResponse, summary="上传文件到知识库，并删除另一个文件")(
         update_doc)
+    app.get("/chat_with_third", response_model=DingTalkResponse, summary="外部调用chatbot模型")(chat_with_third)
+    app.get("/chat_with_third_async", response_model=DingTalkResponse, summary="外部调用chatbot模型")(chat_with_third_async)
 
     local_doc_qa = LocalDocQA()
     local_doc_qa.init_cfg(
